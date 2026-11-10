@@ -18,4 +18,6 @@ Edit `offices.json` (name, lat, lng, streetview). Commit and push; Netlify redep
 - If GPS is denied or unavailable, customers tap the map to pin their location and can drag the pin.
 - The nearest office is highlighted and offices are sorted by distance. Tapping an office makes it the preferred one.
 - Clicking a marker shows a photo of the office (images/ folder, set per office in offices.json); tap it to enlarge.
-- "Navigate" opens Google Maps turn-by-turn directions from the customer's pin to the office. Distances shown in the app are straight-line.
+- A Google-style blue route, travel time, distance and step-by-step directions are drawn in the page using free OSRM servers (routing.openstreetmap.de; no API key). Public transport is not supported there, so it falls back to the "Open in Google Maps app" button.
+- The nearest office is picked by road distance when the routing service is reachable, otherwise by straight-line distance.
+- For heavy production use, switch to your own routing key (OpenRouteService, Mapbox or Google Directions) because the free servers have fair-use limits.

@@ -7,111 +7,187 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const $ = id => document.getElementById(id);
 const listEl = $('list'), statusEl = $('status'), nearestEl = $('nearest'), modeEl = $('mode');
 
+// Free OSRM-based routing servers (no API key). Transit is not available, so it falls back to Google Maps.
+const ROUTERS = {
+  driving: 'https://routing.openstreetmap.de/routed-car/route/v1/driving',
+  walking: 'https://routing.openstreetmap.de/routed-foot/route/v1/driving',
+  bicycling: 'https://routing.openstreetmap.de/routed-bike/route/v1/driving'
+};
+const CAR_TABLE = 'https://routing.openstreetmap.de/routed-car/table/v1/driving';
+
 let offices = [];
-let userPos = null;      // {lat, lng}
+let userPos = null;
 let userMarker = null;
-let selectedIdx = null;  // preferred office (user-chosen), else nearest is used
-let routeLine = null;
+let selectedIdx = null;   // preferred office (user-chosen); null = use nearest
+let roadKm = null;        // road distances (km) from the user to each office, if available
+let routeLayers = [];
+let routeCache = {};
+let reqId = 0;
 
-const youIcon = L.divIcon({ className: '', html: '<div style="width:18px;height:18px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 0 0 2px #2563eb"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+const youIcon = L.divIcon({ className: '', html: '<div style="width:18px;height:18px;border-radius:50%;background:#4285F4;border:3px solid #fff;box-shadow:0 0 0 2px #4285F4"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
 
-function km(a, b) { // haversine, straight-line distance
+function straightKm(a, b) {
   const R = 6371, rad = x => x * Math.PI / 180;
   const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
-const fmt = d => d < 1 ? Math.round(d * 1000) + ' m' : d.toFixed(1) + ' km';
+const distTo = i => (roadKm && roadKm[i] != null) ? roadKm[i] : straightKm(userPos, offices[i]);
+const fmtKm = d => d < 1 ? Math.round(d * 1000) + ' m' : d.toFixed(1) + ' km';
+const fmtMin = s => { const m = Math.round(s / 60); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; };
 
-function navUrl(o) {
-  const dest = `${o.lat},${o.lng}`;
+function gmapsUrl(o) {
   const origin = userPos ? `&origin=${userPos.lat},${userPos.lng}` : '';
-  return `https://www.google.com/maps/dir/?api=1${origin}&destination=${dest}&travelmode=${modeEl.value}`;
+  return `https://www.google.com/maps/dir/?api=1${origin}&destination=${o.lat},${o.lng}&travelmode=${modeEl.value}`;
 }
 
+function nearestIdx() {
+  let best = 0, bestD = Infinity;
+  offices.forEach((o, i) => { const d = distTo(i); if (d < bestD) { bestD = d; best = i; } });
+  return best;
+}
+
+// ---------- user location ----------
+let tableTimer = null;
 function setUser(lat, lng, label) {
   userPos = { lat, lng };
+  roadKm = null;
+  routeCache = {};
   if (!userMarker) {
     userMarker = L.marker([lat, lng], { icon: youIcon, draggable: true, title: 'You' }).addTo(map);
-    userMarker.on('dragend', () => {
-      const p = userMarker.getLatLng();
-      setUser(p.lat, p.lng, 'Pin moved.');
-    });
+    userMarker.on('dragend', () => { const p = userMarker.getLatLng(); setUser(p.lat, p.lng, 'Pin moved.'); });
   } else {
     userMarker.setLatLng([lat, lng]);
   }
   userMarker.bindPopup('You are here (drag to adjust)');
   statusEl.textContent = label || '';
   refresh(true);
+  clearTimeout(tableTimer);
+  tableTimer = setTimeout(loadRoadDistances, 300);
 }
 
-function nearestIdx() {
-  let best = 0, bestD = Infinity;
-  offices.forEach((o, i) => { const d = km(userPos, o); if (d < bestD) { bestD = d; best = i; } });
-  return best;
+// nearest office by ROAD distance (falls back to straight-line if the service is unreachable)
+async function loadRoadDistances() {
+  const me = userPos;
+  if (!me || !offices.length) return;
+  const coords = [`${me.lng},${me.lat}`, ...offices.map(o => `${o.lng},${o.lat}`)].join(';');
+  try {
+    const r = await fetch(`${CAR_TABLE}/${coords}?sources=0&annotations=distance`);
+    const j = await r.json();
+    if (me !== userPos || j.code !== 'Ok') return;
+    roadKm = j.distances[0].slice(1).map(m => m == null ? null : m / 1000);
+    refresh(true);
+  } catch (e) { /* keep straight-line distances */ }
 }
 
+// ---------- rendering ----------
 function refresh(fit) {
-  // render list (sorted by distance if we know the user's position)
-  const order = offices.map((o, i) => i);
-  if (userPos) order.sort((a, b) => km(userPos, offices[a]) - km(userPos, offices[b]));
+  const order = offices.map((_, i) => i);
+  if (userPos) order.sort((a, b) => distTo(a) - distTo(b));
 
   listEl.innerHTML = '';
   order.forEach(i => {
     const o = offices[i];
     const li = document.createElement('li');
     if (i === selectedIdx) li.classList.add('selected');
-    li.innerHTML = `<strong>${o.name}</strong>` + (userPos ? `<span class="dist">${fmt(km(userPos, o))}</span>` : '');
+    li.innerHTML = `<strong>${o.name}</strong>` + (userPos ? `<span class="dist">${fmtKm(distTo(i))}${roadKm ? '' : ' (approx.)'}</span>` : '');
     li.addEventListener('click', () => { selectedIdx = i; refresh(false); map.setView([o.lat, o.lng], 15); o.marker.openPopup(); });
     listEl.appendChild(li);
   });
 
-  // pick target: preferred if chosen, otherwise nearest
   if (!userPos && selectedIdx === null) { nearestEl.classList.add('hidden'); clearRoute(); return; }
   const idx = selectedIdx !== null ? selectedIdx : nearestIdx();
   const o = offices[idx];
   const isNearest = userPos && idx === nearestIdx();
   const title = selectedIdx !== null ? (isNearest ? 'Your preferred office (also the nearest)' : 'Your preferred office') : 'Nearest office';
+
   nearestEl.classList.remove('hidden');
-  nearestEl.innerHTML = `<strong>${title}</strong><br>${o.name}` +
-    (userPos ? `<br><span class="hint">About ${fmt(km(userPos, o))} away in a straight line</span>` : '<br><span class="hint">Set your location to get directions from where you are.</span>') +
-    `<br><a class="go" href="${navUrl(o)}" target="_blank" rel="noopener">🧭 Navigate to ${o.name.replace(' Tellering Office', '')}</a>` +
+  nearestEl.innerHTML = `<strong>${title}</strong><br>${o.name}
+    <div id="route-info" class="hint">${userPos ? 'Finding the best route…' : 'Set your location to get directions.'}</div>
+    <div id="route-steps"></div>
+    <a class="go" href="${gmapsUrl(o)}" target="_blank" rel="noopener">Open in Google Maps app</a>` +
     (selectedIdx !== null && userPos ? `<br><button id="btn-nearest" style="margin-top:8px">Switch back to nearest</button>` : '');
   const bn = $('btn-nearest');
-  if (bn) bn.addEventListener('click', () => { selectedIdx = null; refresh(false); });
+  if (bn) bn.addEventListener('click', () => { selectedIdx = null; refresh(true); });
 
-  drawRoute(o);
-  if (fit && userPos) map.fitBounds([[userPos.lat, userPos.lng], [o.lat, o.lng]], { padding: [60, 60] });
+  showRoute(idx, fit);
 }
 
-function clearRoute() { if (routeLine) { map.removeLayer(routeLine); routeLine = null; } }
-function drawRoute(o) {
+// ---------- routing (Google-style blue route) ----------
+function clearRoute() { routeLayers.forEach(l => map.removeLayer(l)); routeLayers = []; }
+
+function stepText(s) {
+  const m = s.maneuver || {}, name = s.name ? ` onto ${s.name}` : '', mod = m.modifier || '';
+  switch (m.type) {
+    case 'depart': return `Head ${mod || 'out'}${s.name ? ' on ' + s.name : ''}`;
+    case 'arrive': return 'Arrive at the office';
+    case 'roundabout': case 'rotary': return `At the roundabout, take exit ${m.exit || ''}${name}`.trim();
+    case 'turn': case 'end of road': case 'fork': case 'on ramp': case 'off ramp':
+      return `${mod === 'straight' ? 'Continue straight' : 'Turn ' + mod}${name}`;
+    case 'new name': case 'continue': return `Continue${s.name ? ' on ' + s.name : ''}`;
+    default: return `${mod ? 'Go ' + mod : 'Continue'}${name}`;
+  }
+}
+
+async function showRoute(idx, fit) {
   clearRoute();
   if (!userPos) return;
-  routeLine = L.polyline([[userPos.lat, userPos.lng], [o.lat, o.lng]], { color: '#16a34a', weight: 4, dashArray: '8 8' }).addTo(map);
+  const o = offices[idx], me = userPos, mode = modeEl.value, id = ++reqId;
+  const info = () => $('route-info'), steps = () => $('route-steps');
+
+  if (!ROUTERS[mode]) {
+    if (info()) info().textContent = 'In-app routes are not available for public transport. Use the Google Maps button below.';
+    drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
+    return;
+  }
+  const key = `${mode}|${idx}|${me.lat},${me.lng}`;
+  try {
+    let route = routeCache[key];
+    if (!route) {
+      const url = `${ROUTERS[mode]}/${me.lng},${me.lat};${o.lng},${o.lat}?overview=full&geometries=geojson&steps=true`;
+      const j = await (await fetch(url)).json();
+      if (j.code !== 'Ok') throw new Error(j.code);
+      route = routeCache[key] = j.routes[0];
+    }
+    if (id !== reqId) return; // a newer request replaced this one
+    const pts = route.geometry.coordinates.map(c => [c[1], c[0]]);
+    drawLine(pts, false);
+    if (fit) map.fitBounds(pts, { padding: [60, 60] });
+    if (info()) info().innerHTML = `<span class="big">${fmtMin(route.duration)}</span> <span>(${fmtKm(route.distance / 1000)})</span>`;
+    if (steps()) {
+      const items = route.legs[0].steps.map(s => `<li>${stepText(s)}<span class="sd">${s.distance >= 1 ? fmtKm(s.distance / 1000) : ''}</span></li>`).join('');
+      steps().innerHTML = `<details><summary>Step-by-step directions</summary><ol class="steps">${items}</ol></details>`;
+    }
+  } catch (e) {
+    if (id !== reqId) return;
+    drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
+    if (info()) info().textContent = 'Could not load the road route right now. Showing a straight line; use the Google Maps button for directions.';
+  }
 }
 
-// --- GPS ---
+function drawLine(pts, dashed) {
+  if (dashed) {
+    routeLayers.push(L.polyline(pts, { color: '#4285F4', weight: 4, dashArray: '8 8' }).addTo(map));
+    return;
+  }
+  routeLayers.push(L.polyline(pts, { color: '#fff', weight: 10, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map));
+  routeLayers.push(L.polyline(pts, { color: '#4285F4', weight: 6, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map));
+}
+
+// ---------- GPS / manual pin ----------
 $('btn-gps').addEventListener('click', () => {
   if (!navigator.geolocation) { statusEl.textContent = 'GPS is not supported on this device. Tap the map to pin your location.'; return; }
   statusEl.textContent = 'Getting your location…';
   navigator.geolocation.getCurrentPosition(
     pos => setUser(pos.coords.latitude, pos.coords.longitude, 'Location found. You can drag the pin if it is off.'),
-    err => {
-      const msg = err.code === 1 ? 'Location permission denied. Turn on GPS/location for this site, or tap the map to pin your location.'
-        : 'Could not get your location. Tap the map to pin it manually.';
-      statusEl.textContent = msg;
-    },
+    err => { statusEl.textContent = err.code === 1 ? 'Location permission denied. Turn on GPS/location for this site, or tap the map to pin your location.' : 'Could not get your location. Tap the map to pin it manually.'; },
     { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
   );
 });
-
-// --- manual pin ---
 map.on('click', e => setUser(e.latlng.lat, e.latlng.lng, 'Pinned manually. Drag the pin to adjust.'));
+modeEl.addEventListener('change', () => refresh(true));
 
-modeEl.addEventListener('change', () => refresh(false));
-
-// --- load offices ---
+// ---------- load offices ----------
 fetch('offices.json').then(r => r.json()).then(data => {
   offices = data;
   const pts = [];
@@ -130,7 +206,7 @@ fetch('offices.json').then(r => r.json()).then(data => {
   refresh(false);
 });
 
-// --- photo lightbox (tap a photo in a popup to enlarge, tap again to close) ---
+// ---------- photo lightbox ----------
 const lb = document.createElement('div');
 lb.id = 'lightbox';
 lb.innerHTML = '<div id="lb-title"></div><img id="lb-img" alt="">';
