@@ -196,32 +196,80 @@ async function routesORS(mode, me, o) {
   }));
 }
 
-async function routesOSRM(mode, me, o) {
-  const path = `${me.lng},${me.lat};${o.lng},${o.lat}`;
-  const bases = [ROUTERS[mode]];
-  if (mode === 'driving') bases.push('https://router.project-osrm.org/route/v1/driving');
-  const opts = ['overview=full&geometries=geojson&steps=true&alternatives=true', 'overview=full&geometries=geojson&steps=true'];
-  for (const base of bases) {
-    for (const q of opts) {
+async function getJson(url, opts = {}, ms = 9000) {
+  const c = new AbortController(), t = setTimeout(() => c.abort(), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: c.signal });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+function osrmProvider(label, base) {
+  return async (mode, me, o) => {
+    const path = `${me.lng},${me.lat};${o.lng},${o.lat}`;
+    let lastErr;
+    for (const q of ['overview=full&geometries=geojson&steps=true&alternatives=true', 'overview=full&geometries=geojson&steps=true']) {
       try {
-        const j = await (await fetch(`${base}/${path}?${q}`)).json();
+        const j = await getJson(`${base}/${path}?${q}`);
         if (j.code === 'Ok' && j.routes && j.routes.length) return j.routes;
-      } catch (e) { /* next variant */ }
+        lastErr = new Error(j.code || 'no route');
+      } catch (e) { lastErr = e; }
     }
+    throw new Error(label + ': ' + (lastErr && lastErr.message));
+  };
+}
+
+function decodePoly6(str) {
+  let i = 0, lat = 0, lng = 0; const out = [];
+  while (i < str.length) {
+    let b, shift = 0, res = 0;
+    do { b = str.charCodeAt(i++) - 63; res |= (b & 31) << shift; shift += 5; } while (b >= 32);
+    lat += (res & 1) ? ~(res >> 1) : (res >> 1);
+    shift = 0; res = 0;
+    do { b = str.charCodeAt(i++) - 63; res |= (b & 31) << shift; shift += 5; } while (b >= 32);
+    lng += (res & 1) ? ~(res >> 1) : (res >> 1);
+    out.push([lng / 1e6, lat / 1e6]);
   }
-  throw new Error('free OSRM servers not reachable');
+  return out;
+}
+
+async function routesValhalla(mode, me, o) {
+  const costing = { driving: 'auto', walking: 'pedestrian', bicycling: 'bicycle' }[mode];
+  if (!costing) throw new Error('Valhalla: unsupported mode');
+  const req = { locations: [{ lat: me.lat, lon: me.lng }, { lat: o.lat, lon: o.lng }], costing, alternates: 2, directions_options: { units: 'kilometers' } };
+  let j;
+  try { j = await getJson('https://valhalla1.openstreetmap.de/route?json=' + encodeURIComponent(JSON.stringify(req))); }
+  catch (e) { throw new Error('Valhalla: ' + e.message); }
+  const trips = [j.trip, ...((j.alternates || []).map(a => a.trip))].filter(t => t && t.legs && t.legs.length);
+  if (!trips.length) throw new Error('Valhalla: no route');
+  return trips.map(t => ({
+    geometry: { coordinates: decodePoly6(t.legs[0].shape) },
+    distance: t.summary.length * 1000,
+    duration: t.summary.time,
+    legs: [{ steps: t.legs[0].maneuvers.map(m => ({ distance: m.length * 1000, text: m.instruction })) }]
+  }));
 }
 
 async function fetchRoutes(mode, me, o) {
-  const providers = [];
-  if (CFG.googleMapsKey) providers.push(routesGoogle);
-  if (CFG.orsKey && mode !== 'transit') providers.push(routesORS);
-  if (ROUTERS[mode]) providers.push(routesOSRM);
+  const keyed = [];
+  if (CFG.googleMapsKey) keyed.push(routesGoogle);
+  if (CFG.orsKey && mode !== 'transit') keyed.push(routesORS);
   const errors = [];
-  for (const p of providers) {
+  for (const p of keyed) {
     try { return await p(mode, me, o); } catch (e) { errors.push(e.message); }
   }
-  throw new Error(errors.join('; ') || 'no routing provider for this mode');
+  // free providers: ask all at once, first good answer wins
+  const free = [];
+  if (ROUTERS[mode]) free.push(osrmProvider('OSRM-de', ROUTERS[mode]));
+  if (mode === 'driving') free.push(osrmProvider('OSRM-demo', 'https://router.project-osrm.org/route/v1/driving'));
+  if (mode !== 'transit') free.push(routesValhalla);
+  if (!free.length) throw new Error(errors.join('; ') || 'no routing provider for this mode');
+  try {
+    return await Promise.any(free.map(p => p(mode, me, o)));
+  } catch (agg) {
+    throw new Error(errors.concat((agg.errors || []).map(e => e.message)).join('; '));
+  }
 }
 
 function pickRoute(routes) {
@@ -258,6 +306,15 @@ async function showRoute(idx, fit) {
     drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
     if (info()) info().textContent = 'Could not load the road route (' + e.message + '). Showing a straight line; use the Google Maps button for directions.';
     console.error('Routing failed:', e);
+    if (steps()) {
+      const dirflg = { driving: 'd', walking: 'w', bicycling: 'b', transit: 'r' }[mode] || 'd';
+      const src = `https://maps.google.com/maps?saddr=${me.lat},${me.lng}&daddr=${o.lat},${o.lng}&dirflg=${dirflg}&output=embed`;
+      steps().innerHTML = '<button id="btn-gframe" class="btn" type="button" style="width:100%;margin-top:10px">Show Google Maps route here</button><div id="gframe-box"></div>';
+      $('btn-gframe').addEventListener('click', () => {
+        $('gframe-box').innerHTML = `<iframe class="gframe" src="${src}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" title="Route on Google Maps"></iframe>`;
+        $('btn-gframe').classList.add('hidden');
+      });
+    }
   }
 }
 
