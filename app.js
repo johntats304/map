@@ -129,6 +129,16 @@ function stepText(s) {
   }
 }
 
+function pickRoute(routes) {
+  const pref = $('pref').value;
+  const short = routes.reduce((a, b) => b.distance < a.distance ? b : a);
+  const fast = routes.reduce((a, b) => b.duration < a.duration ? b : a);
+  if (pref === 'shortest') return short;
+  if (pref === 'fastest') return fast;
+  // recommended: the shortest route, unless it is much slower than the fastest one
+  return short.duration <= fast.duration * 1.25 ? short : fast;
+}
+
 async function showRoute(idx, fit) {
   clearRoute();
   if (!userPos) return;
@@ -142,26 +152,50 @@ async function showRoute(idx, fit) {
   }
   const key = `${mode}|${idx}|${me.lat},${me.lng}`;
   try {
-    let route = routeCache[key];
-    if (!route) {
-      const url = `${ROUTERS[mode]}/${me.lng},${me.lat};${o.lng},${o.lat}?overview=full&geometries=geojson&steps=true`;
+    let routes = routeCache[key];
+    if (!routes) {
+      const url = `${ROUTERS[mode]}/${me.lng},${me.lat};${o.lng},${o.lat}?overview=full&geometries=geojson&steps=true&alternatives=3`;
       const j = await (await fetch(url)).json();
-      if (j.code !== 'Ok') throw new Error(j.code);
-      route = routeCache[key] = j.routes[0];
+      if (j.code !== 'Ok' || !j.routes.length) throw new Error(j.code);
+      routes = routeCache[key] = j.routes;
     }
-    if (id !== reqId) return; // a newer request replaced this one
-    const pts = route.geometry.coordinates.map(c => [c[1], c[0]]);
-    drawLine(pts, false);
-    if (fit) map.fitBounds(pts, { padding: [60, 60] });
-    if (info()) info().innerHTML = `<span class="big">${fmtMin(route.duration)}</span> <span>(${fmtKm(route.distance / 1000)})</span>`;
-    if (steps()) {
-      const items = route.legs[0].steps.map(s => `<li>${stepText(s)}<span class="sd">${s.distance >= 1 ? fmtKm(s.distance / 1000) : ''}</span></li>`).join('');
-      steps().innerHTML = `<details><summary>Step-by-step directions</summary><ol class="steps">${items}</ol></details>`;
-    }
+    if (id !== reqId) return;
+    renderRoutes(routes, pickRoute(routes), fit);
   } catch (e) {
     if (id !== reqId) return;
     drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
     if (info()) info().textContent = 'Could not load the road route right now. Showing a straight line; use the Google Maps button for directions.';
+  }
+}
+
+function renderRoutes(routes, chosen, fit) {
+  clearRoute();
+  const toPts = r => r.geometry.coordinates.map(c => [c[1], c[0]]);
+  // alternatives in grey (tap one to switch), chosen route in blue on top
+  routes.forEach(r => {
+    if (r === chosen) return;
+    const pts = toPts(r);
+    routeLayers.push(L.polyline(pts, { color: '#fff', weight: 9, lineCap: 'round' }).addTo(map));
+    const alt = L.polyline(pts, { color: '#9aa0a6', weight: 6, lineCap: 'round' }).addTo(map);
+    alt.on('click', ev => { L.DomEvent.stopPropagation(ev); renderRoutes(routes, r, false); });
+    routeLayers.push(alt);
+  });
+  const pts = toPts(chosen);
+  drawLine(pts, false);
+  if (fit) map.fitBounds(pts, { padding: [60, 60] });
+
+  const info = $('route-info'), steps = $('route-steps');
+  if (info) {
+    const short = routes.reduce((a, b) => b.distance < a.distance ? b : a);
+    const fast = routes.reduce((a, b) => b.duration < a.duration ? b : a);
+    const tags = [chosen === short ? 'shortest' : '', chosen === fast ? 'fastest' : ''].filter(Boolean).join(' + ');
+    info.innerHTML = `<span class="big">${fmtMin(chosen.duration)}</span> <span>(${fmtKm(chosen.distance / 1000)})</span>` +
+      (tags ? ` <span class="tag">${tags}</span>` : '') +
+      (routes.length > 1 ? `<br><span class="hint">${routes.length - 1} other route${routes.length > 2 ? 's' : ''} shown in grey. Tap one on the map to switch.</span>` : '');
+  }
+  if (steps) {
+    const items = chosen.legs[0].steps.map(s => `<li>${stepText(s)}<span class="sd">${s.distance >= 1 ? fmtKm(s.distance / 1000) : ''}</span></li>`).join('');
+    steps.innerHTML = `<details><summary>Step-by-step directions</summary><ol class="steps">${items}</ol></details>`;
   }
 }
 
@@ -186,6 +220,7 @@ $('btn-gps').addEventListener('click', () => {
 });
 map.on('click', e => setUser(e.latlng.lat, e.latlng.lng, 'Pinned manually. Drag the pin to adjust.'));
 modeEl.addEventListener('change', () => refresh(true));
+$('pref').addEventListener('change', () => refresh(true));
 
 // ---------- load offices ----------
 fetch('offices.json').then(r => r.json()).then(data => {
