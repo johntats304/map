@@ -82,6 +82,7 @@ async function loadRoadDistances() {
 
 // ---------- rendering ----------
 function refresh(fit) {
+  if (!offices.length) return;
   const order = offices.map((_, i) => i);
   if (userPos) order.sort((a, b) => distTo(a) - distTo(b));
 
@@ -90,7 +91,9 @@ function refresh(fit) {
     const o = offices[i];
     const li = document.createElement('li');
     if (i === selectedIdx) li.classList.add('selected');
-    li.innerHTML = `<strong>${o.name}</strong>` + (userPos ? `<span class="dist">${fmtKm(distTo(i))}${roadKm ? '' : ' (approx.)'}</span>` : '');
+    const short = o.name.replace(' Tellering Office', '');
+    li.innerHTML = `<img class="thumb" src="${o.image}" alt="" loading="lazy"><div class="li-body"><div class="li-name">${short}</div><div class="li-sub">Tellering Office</div></div>` +
+      (userPos ? `<div class="li-dist"><b>${fmtKm(distTo(i))}</b>${roadKm ? '' : '<small>approx.</small>'}</div>` : '');
     li.addEventListener('click', () => { selectedIdx = i; refresh(false); map.setView([o.lat, o.lng], 15); o.marker.openPopup(); });
     listEl.appendChild(li);
   });
@@ -102,11 +105,13 @@ function refresh(fit) {
   const title = selectedIdx !== null ? (isNearest ? 'Your preferred office (also the nearest)' : 'Your preferred office') : 'Nearest office';
 
   nearestEl.classList.remove('hidden');
-  nearestEl.innerHTML = `<strong>${title}</strong><br>${o.name}
+  nearestEl.innerHTML = `<div class="res-label">${title}</div><div class="res-name">${o.name}</div>
     <div id="route-info" class="hint">${userPos ? 'Finding the best route…' : 'Set your location to get directions.'}</div>
     <div id="route-steps"></div>
-    <a class="go" href="${gmapsUrl(o)}" target="_blank" rel="noopener">Open in Google Maps app</a>` +
-    (selectedIdx !== null && userPos ? `<br><button id="btn-nearest" style="margin-top:8px">Switch back to nearest</button>` : '');
+    <div class="actions">
+      <a class="btn btn-go" href="${gmapsUrl(o)}" target="_blank" rel="noopener">Open in Google Maps</a>` +
+      (selectedIdx !== null && userPos ? `<button id="btn-nearest" class="btn" type="button">Switch to nearest</button>` : '') +
+    `</div>`;
   const bn = $('btn-nearest');
   if (bn) bn.addEventListener('click', () => { selectedIdx = null; refresh(true); });
 
@@ -282,7 +287,7 @@ function renderRoutes(routes, chosen, fit) {
       (routes.length > 1 ? `<br><span class="hint">${routes.length - 1} other route${routes.length > 2 ? 's' : ''} shown in grey. Tap one on the map to switch.</span>` : '');
   }
   if (steps) {
-    const items = chosen.legs[0].steps.map(s => `<li>${stepText(s)}<span class="sd">${s.distance >= 1 ? fmtKm(s.distance / 1000) : ''}</span></li>`).join('');
+    const items = chosen.legs[0].steps.map(s => `<li><span class="st">${stepText(s)}</span><span class="sd">${s.distance >= 1 ? fmtKm(s.distance / 1000) : ''}</span></li>`).join('');
     steps.innerHTML = `<details><summary>Step-by-step directions</summary><ol class="steps">${items}</ol></details>`;
   }
 }
@@ -296,16 +301,88 @@ function drawLine(pts, dashed) {
   routeLayers.push(L.polyline(pts, { color: '#4285F4', weight: 6, opacity: 1, lineCap: 'round', lineJoin: 'round' }).addTo(map));
 }
 
-// ---------- GPS / manual pin ----------
-$('btn-gps').addEventListener('click', () => {
-  if (!navigator.geolocation) { statusEl.textContent = 'GPS is not supported on this device. Tap the map to pin your location.'; return; }
-  statusEl.textContent = 'Getting your location…';
-  navigator.geolocation.getCurrentPosition(
-    pos => setUser(pos.coords.latitude, pos.coords.longitude, 'Location found. You can drag the pin if it is off.'),
-    err => { statusEl.textContent = err.code === 1 ? 'Location permission denied. Turn on GPS/location for this site, or tap the map to pin your location.' : 'Could not get your location. Tap the map to pin it manually.'; },
-    { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
-  );
-});
+// ---------- GPS / manual pin / place search ----------
+const UA = navigator.userAgent || '';
+const IS_IOS = /iPhone|iPad|iPod/i.test(UA);
+const IN_APP = /FBAN|FBAV|FB_IAB|FBIOS|Messenger|Instagram|Line\/|Viber|Snapchat|TikTok|MicroMessenger|Twitter|; wv\)/i.test(UA);
+const gpsBtn = $('btn-gps');
+let gpsTimer = null;
+
+function setBusy(on) {
+  gpsBtn.disabled = on;
+  gpsBtn.textContent = on ? 'Finding you…' : '📍 Use my current location';
+  if (!on) clearTimeout(gpsTimer);
+}
+function say(msg) { statusEl.textContent = msg; }
+
+function deniedHelp() {
+  return IS_IOS
+    ? 'Location is blocked. On iPhone: Settings > Privacy & Security > Location Services (turn On), then Safari Websites > While Using the App. Then reload and tap the button again. Or just tap the map to pin your location.'
+    : 'Location is blocked. Tap the lock icon next to the web address > Permissions > Location > Allow, make sure Location is On in your phone settings, then tap the button again. Or just tap the map to pin your location.';
+}
+
+function onPosition(pos) {
+  setBusy(false);
+  try {
+    setUser(pos.coords.latitude, pos.coords.longitude, 'Location found. Drag the pin if it is off.');
+  } catch (e) {
+    console.error(e);
+    say('Location found but the page had a problem showing it: ' + e.message + '. Tap the map to pin instead.');
+  }
+}
+function onFail(err) {
+  setBusy(false);
+  if (err && err.code === 1) say(deniedHelp());
+  else if (err && err.code === 2) say('Your phone could not work out where you are. Turn on Location/GPS in your phone settings and try again, or tap the map to pin your location.');
+  else say('Finding your location took too long. Try again near a window or outdoors, or tap the map to pin your location.');
+}
+
+async function locate() {
+  if (!window.isSecureContext) { say('Location only works on a secure (https) page. Open the https link of this site, or tap the map to pin your location.'); return; }
+  if (!navigator.geolocation) { say('This browser has no GPS support. Tap the map to pin your location.'); return; }
+  try {
+    const st = await navigator.permissions.query({ name: 'geolocation' });
+    if (st.state === 'denied') { say(deniedHelp()); return; }
+  } catch (e) { /* Permissions API not available (e.g. some iOS versions); just try */ }
+
+  setBusy(true);
+  say('Finding your location… tap Allow if your phone asks.');
+  gpsTimer = setTimeout(() => { setBusy(false); say('No answer from your phone. If no permission box appeared, open this page in Chrome or Safari, or tap the map to pin your location.'); }, 40000);
+
+  // 1) precise GPS (quick try), 2) fall back to network/Wi-Fi location (works indoors)
+  navigator.geolocation.getCurrentPosition(onPosition, err => {
+    if (err.code === 1) { onFail(err); return; }
+    say('Still looking… using network location.');
+    navigator.geolocation.getCurrentPosition(onPosition, onFail, { enableHighAccuracy: false, timeout: 20000, maximumAge: 300000 });
+  }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+}
+gpsBtn.addEventListener('click', locate);
+
+// in-app browsers (Messenger, Facebook, Viber...) often block location
+if (IN_APP) {
+  const b = $('inapp');
+  b.classList.remove('hidden');
+  $('btn-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(location.href); $('btn-copy').textContent = 'Link copied'; }
+    catch (e) { window.prompt('Copy this link and open it in Chrome or Safari:', location.href); }
+  });
+}
+
+// search an address / barangay / landmark as a backup
+async function searchPlace() {
+  const q = $('place').value.trim();
+  if (!q) return;
+  say('Searching…');
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=ph&viewbox=124.2,8.2,125.2,9.0&q=' + encodeURIComponent(q);
+    const j = await (await fetch(url)).json();
+    if (!j.length) { say('No match found. Try a barangay or town name, or tap the map to pin your location.'); return; }
+    const r = j[0];
+    setUser(parseFloat(r.lat), parseFloat(r.lon), 'Found: ' + r.display_name.split(',').slice(0, 3).join(',') + '. Drag the pin if it is off.');
+  } catch (e) { say('Search is not available right now. Tap the map to pin your location.'); }
+}
+$('btn-search').addEventListener('click', searchPlace);
+$('place').addEventListener('keydown', e => { if (e.key === 'Enter') searchPlace(); });
 map.on('click', e => setUser(e.latlng.lat, e.latlng.lng, 'Pinned manually. Drag the pin to adjust.'));
 modeEl.addEventListener('change', () => refresh(true));
 $('pref').addEventListener('change', () => refresh(true));
@@ -321,7 +398,7 @@ fetch('offices.json').then(r => r.json()).then(data => {
       `<img class="pop-img" src="${o.image}" alt="${o.name}" data-full="${o.image}" data-title="${o.name}">` +
       `<div class="hint">Tap the photo to enlarge. The red arrow points to the office.</div>` +
       `<a href="${gmaps}" target="_blank" rel="noopener">Open in Google Maps</a><br>` +
-      `<a href="${o.streetview}" target="_blank" rel="noopener">Street View</a></div>`, { minWidth: 240 });
+      `<a href="${o.streetview}" target="_blank" rel="noopener">Street View</a></div>`, { minWidth: 220, maxWidth: 260, autoPanPadding: [20, 20] });
     o.marker.on('click', () => { selectedIdx = i; refresh(false); });
     pts.push([o.lat, o.lng]);
   });
@@ -332,7 +409,7 @@ fetch('offices.json').then(r => r.json()).then(data => {
 // ---------- photo lightbox ----------
 const lb = document.createElement('div');
 lb.id = 'lightbox';
-lb.innerHTML = '<div id="lb-title"></div><img id="lb-img" alt="">';
+lb.innerHTML = '<div id="lb-title"></div><img id="lb-img" alt=""><div id="lb-close">Tap anywhere to close</div>';
 document.body.appendChild(lb);
 lb.addEventListener('click', () => lb.classList.remove('show'));
 document.addEventListener('click', e => {
@@ -342,3 +419,11 @@ document.addEventListener('click', e => {
   $('lb-title').textContent = img.dataset.title;
   lb.classList.add('show');
 });
+
+// ---------- mobile bottom sheet ----------
+const panel = $('panel');
+$('handle').addEventListener('click', () => {
+  panel.classList.toggle('collapsed');
+  setTimeout(() => map.invalidateSize(), 300);
+});
+window.addEventListener('resize', () => map.invalidateSize());
