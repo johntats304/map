@@ -129,6 +129,24 @@ function stepText(s) {
   }
 }
 
+// Try several variants so one unsupported option or one busy server does not lose the blue street route.
+async function fetchRoutes(mode, me, o) {
+  const path = `${me.lng},${me.lat};${o.lng},${o.lat}`;
+  const bases = [ROUTERS[mode]];
+  if (mode === 'driving') bases.push('https://router.project-osrm.org/route/v1/driving');
+  const opts = ['overview=full&geometries=geojson&steps=true&alternatives=true', 'overview=full&geometries=geojson&steps=true'];
+  for (const base of bases) {
+    for (const q of opts) {
+      try {
+        const r = await fetch(`${base}/${path}?${q}`);
+        const j = await r.json();
+        if (j.code === 'Ok' && j.routes && j.routes.length) return j.routes;
+      } catch (e) { /* try next variant */ }
+    }
+  }
+  throw new Error('no route');
+}
+
 function pickRoute(routes) {
   const pref = $('pref').value;
   const short = routes.reduce((a, b) => b.distance < a.distance ? b : a);
@@ -154,10 +172,7 @@ async function showRoute(idx, fit) {
   try {
     let routes = routeCache[key];
     if (!routes) {
-      const url = `${ROUTERS[mode]}/${me.lng},${me.lat};${o.lng},${o.lat}?overview=full&geometries=geojson&steps=true&alternatives=3`;
-      const j = await (await fetch(url)).json();
-      if (j.code !== 'Ok' || !j.routes.length) throw new Error(j.code);
-      routes = routeCache[key] = j.routes;
+      routes = routeCache[key] = await fetchRoutes(mode, me, o);
     }
     if (id !== reqId) return;
     renderRoutes(routes, pickRoute(routes), fit);
