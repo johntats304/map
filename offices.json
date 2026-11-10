@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Puerto Tellering Office",
+    "lat": 8.502808,
+    "lng": 124.7527325,
+    "streetview": "https://www.google.com/maps/@8.502808,124.7527325,7a,75y,317.38h,94.52t/data=!3m7!1e1!3m5!1sFdkIRvAHhceYe8VEsoO3YQ!2e0!6shttps:%2F%2Fstreetviewpixels-pa.clients6.google.com%2Fv1%2Fthumbnail%3Fcb_client%3Dmaps_sv.tactile%26w%3D900%26h%3D600%26pitch%3D-4.520528027507098%26panoid%3DFdkIRvAHhceYe8VEsoO3YQ%26yaw%3D317.3803930788867!7i16384!8i8192"
+  },
+  {
+    "name": "Tagoloan Tellering Office",
+    "lat": 8.5400162,
+    "lng": 124.7525707,
+    "streetview": "https://google.com/maps/@8.5400162,124.7525707,12a,75y,10.69h,90t/data=!3m7!1e1!3m5!1sqRGH7vloK-aQEv1F_02FZg!2e0!6shttps:%2F%2Fstreetviewpixels-pa.clients6.google.com%2Fv1%2Fthumbnail%3Fcb_client%3Dmaps_sv.tactile%26w%3D900%26h%3D600%26pitch%3D0%26panoid%3DqRGH7vloK-aQEv1F_02FZg%26yaw%3D10.690214813202122!7i16384!8i8192"
+  },
+  {
+    "name": "Villanueva Tellering Office",
+    "lat": 8.580036,
+    "lng": 124.7753598,
+    "streetview": "https://www.google.com/maps/@8.580036,124.7753598,11a,75y,353.24h,81.54t/data=!3m7!1e1!3m5!1sFl-kfNzoGA7hN0MzFo8CzQ!2e0!6shttps:%2F%2Fstreetviewpixels-pa.clients6.google.com%2Fv1%2Fthumbnail%3Fcb_client%3Dmaps_sv.tactile%26w%3D900%26h%3D600%26pitch%3D8.456567889437608%26panoid%3DFl-kfNzoGA7hN0MzFo8CzQ%26yaw%3D353.24418321727984!7i16384!8i8192"
+  },
+  {
+    "name": "Jasaan Tellering Office",
+    "lat": 8.6519313,
+    "lng": 124.75359,
+    "streetview": "https://www.google.com/maps/@8.6519313,124.75359,23a,75y,177.06h,89.39t/data=!3m7!1e1!3m5!1sxCMDrZqRYfa2w01AYzqz6Q!2e0!6shttps:%2F%2Fstreetviewpixels-pa.clients6.google.com%2Fv1%2Fthumbnail%3Fcb_client%3Dmaps_sv.tactile%26w%3D900%26h%3D600%26pitch%3D0.6085821369365192%26panoid%3DxCMDrZqRYfa2w01AYzqz6Q%26yaw%3D177.05514981042083!7i16384!8i8192"
+  }
+]

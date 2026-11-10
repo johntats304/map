@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+body { display: flex; }
+#panel { width: 300px; padding: 16px; overflow-y: auto; border-right: 1px solid #ddd; background: #fafafa; }
+#panel h1 { font-size: 1.2rem; margin: 0 0 12px; }
+#list { list-style: none; margin: 0; padding: 0; }
+#list li { padding: 10px; margin-bottom: 8px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; }
+#list li:hover { border-color: #2563eb; }
+#list a { font-size: .85rem; color: #2563eb; }
+#map { flex: 1; }
+@media (max-width: 700px) {
+  body { flex-direction: column-reverse; }
+  #panel { width: 100%; height: 35%; border-right: 0; border-top: 1px solid #ddd; }
+  #map { height: 65%; }
+}
