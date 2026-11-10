@@ -117,6 +117,7 @@ function refresh(fit) {
 function clearRoute() { routeLayers.forEach(l => map.removeLayer(l)); routeLayers = []; }
 
 function stepText(s) {
+  if (s.text) return s.text;
   const m = s.maneuver || {}, name = s.name ? ` onto ${s.name}` : '', mod = m.modifier || '';
   switch (m.type) {
     case 'depart': return `Head ${mod || 'out'}${s.name ? ' on ' + s.name : ''}`;
@@ -129,8 +130,68 @@ function stepText(s) {
   }
 }
 
-// Try several variants so one unsupported option or one busy server does not lose the blue street route.
-async function fetchRoutes(mode, me, o) {
+// ---------- routing providers: Google (key) -> OpenRouteService (key) -> free OSRM ----------
+const CFG = window.APP_CONFIG || {};
+let googlePromise = null;
+function loadGoogle() {
+  if (googlePromise) return googlePromise;
+  googlePromise = new Promise((resolve, reject) => {
+    window.gm_authFailure = () => reject(new Error('Google Maps key rejected (check key, billing and referrer restriction)'));
+    window.__gmReady = () => resolve(window.google);
+    const sc = document.createElement('script');
+    sc.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(CFG.googleMapsKey)}&callback=__gmReady`;
+    sc.onerror = () => reject(new Error('Could not load Google Maps script'));
+    document.head.appendChild(sc);
+  });
+  return googlePromise;
+}
+
+async function routesGoogle(mode, me, o) {
+  const g = await loadGoogle();
+  const modes = { driving: 'DRIVING', walking: 'WALKING', bicycling: 'BICYCLING', transit: 'TRANSIT' };
+  const res = await new Promise((resolve, reject) => {
+    new g.maps.DirectionsService().route({
+      origin: { lat: me.lat, lng: me.lng },
+      destination: { lat: o.lat, lng: o.lng },
+      travelMode: g.maps.TravelMode[modes[mode]],
+      provideRouteAlternatives: true
+    }, (r, status) => status === 'OK' ? resolve(r) : reject(new Error('Google Directions: ' + status)));
+  });
+  return res.routes.map(r => {
+    const leg = r.legs[0];
+    const coords = [];
+    leg.steps.forEach(st => st.path.forEach(p => coords.push([p.lng(), p.lat()])));
+    return {
+      geometry: { coordinates: coords },
+      distance: leg.distance.value,
+      duration: leg.duration.value,
+      legs: [{ steps: leg.steps.map(st => ({ distance: st.distance.value, text: st.instructions.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() })) }]
+    };
+  });
+}
+
+async function routesORS(mode, me, o) {
+  const profile = { driving: 'driving-car', walking: 'foot-walking', bicycling: 'cycling-regular' }[mode];
+  if (!profile) throw new Error('ORS: unsupported mode');
+  const call = body => fetch(`https://api.openrouteservice.org/v2/directions/${profile}/geojson`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': CFG.orsKey },
+    body: JSON.stringify(body)
+  });
+  const coordinates = [[me.lng, me.lat], [o.lng, o.lat]];
+  let r = await call({ coordinates, instructions: true, alternative_routes: { target_count: 3, share_factor: 0.6, weight_factor: 1.6 } });
+  if (!r.ok) r = await call({ coordinates, instructions: true });
+  if (!r.ok) throw new Error('OpenRouteService HTTP ' + r.status);
+  const j = await r.json();
+  return j.features.map(f => ({
+    geometry: { coordinates: f.geometry.coordinates },
+    distance: f.properties.summary.distance,
+    duration: f.properties.summary.duration,
+    legs: [{ steps: f.properties.segments.flatMap(sg => sg.steps).map(st => ({ distance: st.distance, text: st.instruction })) }]
+  }));
+}
+
+async function routesOSRM(mode, me, o) {
   const path = `${me.lng},${me.lat};${o.lng},${o.lat}`;
   const bases = [ROUTERS[mode]];
   if (mode === 'driving') bases.push('https://router.project-osrm.org/route/v1/driving');
@@ -138,13 +199,24 @@ async function fetchRoutes(mode, me, o) {
   for (const base of bases) {
     for (const q of opts) {
       try {
-        const r = await fetch(`${base}/${path}?${q}`);
-        const j = await r.json();
+        const j = await (await fetch(`${base}/${path}?${q}`)).json();
         if (j.code === 'Ok' && j.routes && j.routes.length) return j.routes;
-      } catch (e) { /* try next variant */ }
+      } catch (e) { /* next variant */ }
     }
   }
-  throw new Error('no route');
+  throw new Error('free OSRM servers not reachable');
+}
+
+async function fetchRoutes(mode, me, o) {
+  const providers = [];
+  if (CFG.googleMapsKey) providers.push(routesGoogle);
+  if (CFG.orsKey && mode !== 'transit') providers.push(routesORS);
+  if (ROUTERS[mode]) providers.push(routesOSRM);
+  const errors = [];
+  for (const p of providers) {
+    try { return await p(mode, me, o); } catch (e) { errors.push(e.message); }
+  }
+  throw new Error(errors.join('; ') || 'no routing provider for this mode');
 }
 
 function pickRoute(routes) {
@@ -163,7 +235,7 @@ async function showRoute(idx, fit) {
   const o = offices[idx], me = userPos, mode = modeEl.value, id = ++reqId;
   const info = () => $('route-info'), steps = () => $('route-steps');
 
-  if (!ROUTERS[mode]) {
+  if (!ROUTERS[mode] && !(CFG.googleMapsKey && mode === 'transit')) {
     if (info()) info().textContent = 'In-app routes are not available for public transport. Use the Google Maps button below.';
     drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
     return;
@@ -179,7 +251,8 @@ async function showRoute(idx, fit) {
   } catch (e) {
     if (id !== reqId) return;
     drawLine([[me.lat, me.lng], [o.lat, o.lng]], true);
-    if (info()) info().textContent = 'Could not load the road route right now. Showing a straight line; use the Google Maps button for directions.';
+    if (info()) info().textContent = 'Could not load the road route (' + e.message + '). Showing a straight line; use the Google Maps button for directions.';
+    console.error('Routing failed:', e);
   }
 }
 
